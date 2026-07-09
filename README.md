@@ -166,6 +166,8 @@ puzzles/ai-regression.tsv    AI 回归题库
 records/                     本地棋谱与运行数据
 ```
 
+更完整的代码使用说明、模块结构和各文件功能介绍见 [CODE_GUIDE.md](CODE_GUIDE.md)。
+
 ## GitHub 提交说明
 
 仓库默认忽略：
