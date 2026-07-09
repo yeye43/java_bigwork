@@ -1,0 +1,26 @@
+# Build output
+target/
+*.class
+
+# Local game records and generated AI data
+records/game-*.jsonl
+records/hidden-records.txt
+records/ai-learning*.tsv
+records/ai-training.tsv
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+
+# IDE and OS files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Local tool caches
+.tools/
