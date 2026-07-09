@@ -82,11 +82,12 @@ Jieqi/
 ├─ config/
 ├─ puzzles/
 ├─ records/
+├─ docs/
+│  ├─ CODE_GUIDE.md
+│  └─ DEPLOYMENT.md
 ├─ pom.xml
 ├─ Dockerfile
-├─ README.md
-├─ DEPLOYMENT.md
-└─ CODE_GUIDE.md
+└─ README.md
 ```
 
 ## 四、核心模块说明
@@ -341,4 +342,3 @@ powershell -ExecutionPolicy Bypass -File .\web.ps1 8080
 
 4. 如果是 AI 策略改动，至少用几局实战和 `puzzles/ai-regression.tsv` 回归题一起验证。
 5. 确认没把 `records/game-*.jsonl`、`target/` 等运行产物加入提交。
-
