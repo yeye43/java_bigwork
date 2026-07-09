@@ -761,7 +761,14 @@ public class SearchAi {
                     return kingRecaptureMajorPenalty(board, next, move, color) < KING_RECAPTURE_MAJOR_PENALTY;
                 })
                 .toList();
-        return safer.isEmpty() ? actions : safer;
+        // Also filter moves that leave a rook trapped or undefended
+        List<Move> noRookBlunders = safer.stream()
+                .filter(move -> {
+                    Board next = applyForSearch(board, move);
+                    return rookSafetyScore(next, color) - rookSafetyScore(board, color) < EXPOSED_MAJOR_PIECE_PENALTY;
+                })
+                .toList();
+        return noRookBlunders.isEmpty() ? (safer.isEmpty() ? actions : safer) : noRookBlunders;
     }
 
     private List<Move> avoidUnsafeLowValueMajorCaptures(Board board, List<Move> actions, PlayerColor color) {
@@ -1468,8 +1475,32 @@ public class SearchAi {
         return orderedMoves(board, color, System.currentTimeMillis(), ply).stream()
                 .filter(move -> board.get(move.destination()) != null
                         || ruleEngine.isInCheck(applyForSearch(board, move), color.opponent())
-                        || isUsefulRevealMove(board, move, color))
+                        || isUsefulRevealMove(board, move, color)
+                        || savesThreatenedMajorPiece(board, move, color))
                 .toList();
+    }
+
+    // Check if a move saves a major piece (rook/cannon) that is under attack.
+    // In quiescence, we need to see defensive moves that prevent material loss.
+    private boolean savesThreatenedMajorPiece(Board board, Move move, PlayerColor color) {
+        Piece mover = board.get(move.source());
+        if (mover == null || knownType(mover) == PieceType.KING) {
+            return false;
+        }
+        int moverVal = pieceSearchValue(board, mover, move.source());
+        if (moverVal < value(PieceType.CANNON)) {
+            return false; // Only care about rook/cannon level pieces
+        }
+        // Check if the piece is currently under attack
+        if (attackersValue(board, move.source(), color.opponent()) == 0) {
+            return false;
+        }
+        // Check if after moving, the piece is safer
+        Board next = applyForSearch(board, move);
+        int attackersAfter = attackersValue(next, move.destination(), color.opponent());
+        int defendersAfter = defendersValue(next, move.destination(), color);
+        // Move to a safe square or to a defended square
+        return attackersAfter == 0 || defendersAfter > 0;
     }
 
     private boolean isUsefulRevealMove(Board board, Move move, PlayerColor color) {
@@ -1601,10 +1632,42 @@ public class SearchAi {
 
     private int nextDepth(int depth, int extensionsRemaining, Board next, PlayerColor nextSide) {
         int nextDepth = depth - 1;
-        if (extensionsRemaining > 0 && ruleEngine.isInCheck(next, nextSide)) {
+        if (extensionsRemaining <= 0) {
+            return nextDepth;
+        }
+        // Extend when side to move is in check
+        if (ruleEngine.isInCheck(next, nextSide)) {
+            return depth;
+        }
+        // Extend when side to move has king with ≤1 escape squares (near-mate)
+        if (legalKingMoveCount(next, nextSide) <= 1 && kingDangerScore(next, nextSide) >= 6_000) {
+            return depth;
+        }
+        // Extend when side to move has an exposed undefended major piece (rook/cannon)
+        // This catches "check + discovered attack on major piece" patterns
+        if (hasExposedMajorPiece(next, nextSide) && immediateThreatScore(next, nextSide.opponent()) >= 3_500) {
             return depth;
         }
         return nextDepth;
+    }
+
+    // Check if a player has an undefended major piece (rook/cannon) that is under attack
+    private boolean hasExposedMajorPiece(Board board, PlayerColor color) {
+        for (Position pos : board.occupiedPositions()) {
+            Piece piece = board.get(pos);
+            if (piece == null || piece.color() != color || knownType(piece) == PieceType.KING) {
+                continue;
+            }
+            int pieceVal = pieceSearchValue(board, piece, pos);
+            if (pieceVal < value(PieceType.CANNON)) {
+                continue;
+            }
+            if (attackersValue(board, pos, color.opponent()) > 0
+                    && defendersValue(board, pos, color) == 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String transpositionKey(Board board, PlayerColor sideToMove, PlayerColor aiColor) {
@@ -1743,17 +1806,27 @@ public class SearchAi {
             return 0;
         }
 
-        int materialLoss = Math.max(movedValue - capturedValue, opponentExchangeGain - capturedValue);
+        int defenders = defendersValue(after, move.destination(), color);
+        // Undefended piece being captured: we lose its full value, not just net difference
+        int materialLoss;
+        if (defenders == 0) {
+            materialLoss = movedValue;
+        } else {
+            materialLoss = Math.max(movedValue - capturedValue, opponentExchangeGain - capturedValue);
+        }
         if (materialLoss <= 0) {
             return movedValue >= HIGH_VALUE_PIECE ? movedValue / 5 : 0;
         }
 
-        int defenders = defendersValue(after, move.destination(), color);
         int defenderDiscount = defenders == 0 ? 0 : Math.min(defenders, movedValue) / 5;
         int visibilityMultiplier = moved.visible() ? BAD_EXCHANGE_PENALTY : 2;
         int highValueExtra = movedValue >= HIGH_VALUE_PIECE && capturedValue <= value(PieceType.PAWN)
                 ? movedValue * 2
                 : 0;
+        // Extra penalty when we lose a piece for a pawn or nothing
+        if (defenders == 0 && capturedValue <= value(PieceType.PAWN) && movedValue >= value(PieceType.KNIGHT)) {
+            highValueExtra = Math.max(highValueExtra, movedValue * 3);
+        }
         return Math.max(0, materialLoss * visibilityMultiplier + highValueExtra - defenderDiscount);
     }
 
@@ -5550,9 +5623,14 @@ public class SearchAi {
         score += hangingPieceScore(board, aiColor);
         score -= exposedImportantPieces(board, aiColor);
         score += exposedImportantPieces(board, aiColor.opponent());
+        score -= rookSafetyScore(board, aiColor);
+        score += rookSafetyScore(board, aiColor.opponent());
         score -= invadingPieceScore(board, aiColor);
         score += invadingPieceScore(board, aiColor.opponent());
         score += immediateThreatScore(board, aiColor) - immediateThreatScore(board, aiColor.opponent());
+        // King safety: directly penalize positions where our king is in danger
+        score -= kingDangerScore(board, aiColor) / 3;
+        score += kingDangerScore(board, aiColor.opponent()) / 3;
         score += revealOpportunityScore(board, aiColor) - revealOpportunityScore(board, aiColor.opponent());
         score += jieqiShapePressure(board, aiColor) - jieqiShapePressure(board, aiColor.opponent());
         score += coordinatedKingAttackScore(board, aiColor) - coordinatedKingAttackScore(board, aiColor.opponent());
@@ -5588,52 +5666,127 @@ public class SearchAi {
     private int immediateThreatScore(Board board, PlayerColor color) {
         int best = 0;
         int examined = 0;
+        PlayerColor opponent = color.opponent();
         for (Move move : moveGenerator.generateActions(board, color, 0)) {
             if (!ruleEngine.canMoveAndKeepKingSafe(board, move.source(), move.destination(), color)) {
                 continue;
             }
             Piece mover = board.get(move.source());
             Piece captured = board.get(move.destination());
-            // Only evaluate captures and check-giving moves for speed
             boolean isCapture = captured != null;
             Board next = applyForSearch(board, move);
-            if (!isCapture && !ruleEngine.isInCheck(next, color.opponent())) {
+            boolean givesCheck = ruleEngine.isInCheck(next, opponent);
+            if (!isCapture && !givesCheck) {
                 continue;
             }
             examined++;
             int score = 0;
             if (captured != null) {
-                score += captureValue(board, captured, move.destination()) * 3;
+                int capVal = captureValue(board, captured, move.destination());
+                score += capVal * 3;
                 if (knownType(captured) == PieceType.KING) {
                     score += WIN_SCORE / 3;
                 }
                 if (mover != null) {
                     score -= pieceSearchValue(board, mover, move.source()) / 4;
                 }
+                // Check+capture combo (将军抽子): captures a piece while giving check
+                if (givesCheck && capVal >= value(PieceType.CANNON)) {
+                    score += capVal * 2; // Extra: opponent must evade check, loses the piece
+                }
             }
-            if (ruleEngine.isInCheck(next, color.opponent())) {
-                if (!moveGenerator.hasCheckEscape(next, color.opponent())) {
+            if (givesCheck) {
+                if (!moveGenerator.hasCheckEscape(next, opponent)) {
                     score += WIN_SCORE / 4;
                 } else {
                     score += CHECK_BONUS / 3;
+                    // Discovered attack: check that also exposes/threatens a major piece
+                    int discoveredLoss = checkDiscoveredAttackLoss(board, next, move, color);
+                    score += discoveredLoss;
                 }
-            } else if (!moveGenerator.hasAnyAction(next, color.opponent())) {
+            } else if (!moveGenerator.hasAnyAction(next, opponent)) {
                 score += WIN_SCORE / 4;
             }
             Piece moved = next.get(move.destination());
             if (moved != null) {
-                int attackers = attackersValue(next, move.destination(), color.opponent());
+                int attackers = attackersValue(next, move.destination(), opponent);
                 int defenders = defendersValue(next, move.destination(), color);
                 if (attackers > 0 && defenders == 0) {
                     score -= pieceSearchValue(next, moved, move.destination());
                 }
             }
+            // After the move, check if opponent has any undefended major pieces
+            if (givesCheck) {
+                score += exposedMajorAfterCheck(next, opponent) / 3;
+            }
             best = Math.max(best, score);
-            if (best >= WIN_SCORE / 4 || examined >= 24) {
+            if (best >= WIN_SCORE / 4 || examined >= 28) {
                 return best;
             }
         }
-        return Math.min(4_000, best);
+        return Math.min(5_200, best);
+    }
+
+    // Detects when a check also attacks/exposes a major piece (将军抽子 pattern).
+    // When we give check, the opponent must evade — check if any of their major pieces
+    // become newly undefended or are directly attacked by our pieces after the check.
+    private int checkDiscoveredAttackLoss(Board before, Board after, Move move, PlayerColor attacker) {
+        PlayerColor defender = attacker.opponent();
+        int loss = 0;
+        Piece moved = after.get(move.destination());
+        // Check each of the defender's major pieces for new exposure
+        for (Position pos : after.occupiedPositions()) {
+            Piece piece = after.get(pos);
+            if (piece == null || piece.color() != defender || knownType(piece) == PieceType.KING) {
+                continue;
+            }
+            int pieceVal = pieceSearchValue(after, piece, pos);
+            if (pieceVal < value(PieceType.KNIGHT)) {
+                continue; // Only care about knight+ value pieces
+            }
+            int attackers = attackersValue(after, pos, attacker);
+            if (attackers == 0) {
+                continue;
+            }
+            int defenders = defendersValue(after, pos, defender);
+            // Direct attack: our piece now attacks their undefended/under-defended piece
+            if (defenders == 0) {
+                loss += pieceVal * 2; // Undefended major piece under attack
+                if (pieceVal >= value(PieceType.ROOK)) {
+                    loss += EXPOSED_MAJOR_PIECE_PENALTY;
+                }
+            } else if (attackers > 0 && defenders > 0) {
+                int attackerVal = attackersValue(after, pos, attacker);
+                if (attackerVal < pieceVal && attackerVal <= value(PieceType.PAWN)) {
+                    loss += pieceVal; // Piece can be captured by a cheaper piece
+                }
+            }
+        }
+        return Math.min(8_000, loss);
+    }
+
+    // After giving check, evaluate how many of opponent's major pieces are exposed.
+    private int exposedMajorAfterCheck(Board board, PlayerColor defender) {
+        int exposure = 0;
+        for (Position pos : board.occupiedPositions()) {
+            Piece piece = board.get(pos);
+            if (piece == null || piece.color() != defender || knownType(piece) == PieceType.KING) {
+                continue;
+            }
+            int pieceVal = pieceSearchValue(board, piece, pos);
+            if (pieceVal < value(PieceType.CANNON)) {
+                continue;
+            }
+            int attackers = attackersValue(board, pos, defender.opponent());
+            int defenders = defendersValue(board, pos, defender);
+            if (attackers > 0 && defenders == 0) {
+                exposure += pieceVal;
+                if (pieceVal >= value(PieceType.ROOK)) {
+                    exposure += EXPOSED_MAJOR_PIECE_PENALTY / 2;
+                }
+            }
+        }
+        return Math.min(6_000, exposure);
     }
 
     private int jieqiShapePressure(Board board, PlayerColor color) {
@@ -7385,6 +7538,11 @@ public class SearchAi {
             score -= obviousGiftPenalty(board, next, move, color) / 2;
             score -= urgentTradePenalty(board, next, move, color,
                     ruleEngine.isInCheck(board, color));
+            // Penalize if this evasion exposes a rook to danger
+            int rookExposureDelta = rookSafetyScore(next, color) - rookSafetyScore(board, color);
+            if (rookExposureDelta > 0) {
+                score -= rookExposureDelta;
+            }
             if (score > bestScore) {
                 bestScore = score;
                 best = move;
@@ -7413,7 +7571,10 @@ public class SearchAi {
         }
         int movedValue = pieceSearchValue(after, moved, move.destination());
         int directLoss = directReplyCaptureLoss(after, move, color, movedValue);
-        if (directLoss <= 0) {
+        // Also check if evading check exposes OTHER major pieces (将军抽子 pattern)
+        int exposedLoss = checkEvasionExposureLoss(before, after, color);
+        int totalLoss = Math.max(directLoss, exposedLoss);
+        if (totalLoss <= 0) {
             return 0;
         }
         Piece captured = before.get(move.destination());
@@ -7422,7 +7583,50 @@ public class SearchAi {
                 : captureValue(before, captured, move.destination());
         int compensation = immediateGain
                 + Math.max(0, immediateThreatScore(after, color) - immediateThreatScore(before, color)) / 6;
-        return Math.max(0, directLoss - compensation);
+        return Math.max(0, totalLoss - compensation);
+    }
+
+    // Detects when evading a check exposes major pieces to capture.
+    // When the king moves to evade check, previously-defended pieces may become undefended,
+    // or the king's new position may allow a discovered attack on a major piece.
+    private int checkEvasionExposureLoss(Board before, Board after, PlayerColor color) {
+        int loss = 0;
+        PlayerColor opponent = color.opponent();
+        for (Position pos : after.occupiedPositions()) {
+            Piece piece = after.get(pos);
+            if (piece == null || piece.color() != color || knownType(piece) == PieceType.KING) {
+                continue;
+            }
+            int pieceVal = pieceSearchValue(after, piece, pos);
+            if (pieceVal < value(PieceType.KNIGHT)) {
+                continue;
+            }
+            int attackersAfter = attackersValue(after, pos, opponent);
+            if (attackersAfter == 0) {
+                continue;
+            }
+            int defendersAfter = defendersValue(after, pos, color);
+            int defendersBefore = defendersValue(before, pos, color);
+            // Piece became undefended or under-defended after check evasion
+            if (defendersAfter == 0) {
+                if (defendersBefore > 0) {
+                    // Piece was defended before, now undefended due to king move
+                    loss += pieceVal * 3;
+                    if (pieceVal >= value(PieceType.ROOK)) {
+                        loss += MAJOR_SAFETY_PRIORITY_PENALTY;
+                    }
+                } else {
+                    // Was already undefended, but now under direct attack
+                    loss += pieceVal;
+                }
+            } else if (attackersAfter > 0 && defendersAfter > 0) {
+                // Check if attacker is cheaper than the piece
+                if (attackersAfter <= value(PieceType.PAWN) && pieceVal >= value(PieceType.CANNON)) {
+                    loss += pieceVal; // Can be captured cheaply
+                }
+            }
+        }
+        return Math.min(12_000, loss);
     }
 
     private int costlyCheckBlockPenalty(Board before, Board after, Move move, PlayerColor color) {
@@ -7473,6 +7677,8 @@ public class SearchAi {
         score += rookCannonBatteryThreatScore(board, color);
         score += opponentPlanThreatScore(board, color);
         score += invadingPieceScore(board, color);
+        // 被将军抽子 detection: check if opponent can give check AND attack a major piece
+        score += checkWithDiscoveredAttackDanger(board, color);
         for (Position source : board.occupiedPositions()) {
             Piece piece = board.get(source);
             if (piece == null || piece.color() != color.opponent()) {
@@ -7481,20 +7687,81 @@ public class SearchAi {
             int distance = manhattan(source, king);
             PieceType type = knownType(piece);
             if (distance <= 4) {
+                // Rook is far more dangerous than cannon/knight when near the king
                 score += Math.max(0, 5 - distance) * switch (type) {
-                    case ROOK -> 520;
-                    case CANNON -> 440;
-                    case KNIGHT -> 360;
-                    case PAWN -> 260;
+                    case ROOK -> 720;   // was 520 — rook is the biggest threat
+                    case CANNON -> 460; // was 440
+                    case KNIGHT -> 380; // was 360
+                    case PAWN -> 280;   // was 260
                     case GUARD, BISHOP -> 120;
                     case KING -> 0;
                 };
             }
             if ((type == PieceType.ROOK || type == PieceType.CANNON) && sameFileOrRank(source, king)) {
-                score += board.countBetween(source, king) <= (type == PieceType.CANNON ? 2 : 1) ? 900 : 240;
+                int between = board.countBetween(source, king);
+                if (type == PieceType.ROOK) {
+                    // Rook directly attacking king on same file/rank is extremely dangerous
+                    score += between == 0 ? 1_450 : between == 1 ? 750 : 280;
+                } else {
+                    // Cannon with exactly one screen piece (cannon mount) is very dangerous
+                    score += between == 1 ? 1_050 : between == 2 ? 580 : 200;
+                }
             }
         }
-        return Math.min(30_000, score);
+        return Math.min(35_000, score);
+    }
+
+    // Detect when the opponent can give a check that simultaneously attacks
+    // or exposes a major piece (被将军抽子 pattern).
+    private int checkWithDiscoveredAttackDanger(Board board, PlayerColor defender) {
+        // Quick check: only compute if there's a reasonable threat level
+        if (legalKingMoveCount(board, defender) >= 3 && !ruleEngine.isInCheck(board, defender)) {
+            return 0; // King is safe enough, skip detailed check
+        }
+        int danger = 0;
+        int examined = 0;
+        PlayerColor attacker = defender.opponent();
+        for (Move move : moveGenerator.generateActions(board, attacker, 0)) {
+            if (examined >= 30 || danger >= 8_000) {
+                break;
+            }
+            if (!ruleEngine.canMoveAndKeepKingSafe(board, move.source(), move.destination(), attacker)) {
+                continue;
+            }
+            examined++;
+            Board next = applyForSearch(board, move);
+            if (!ruleEngine.isInCheck(next, defender)) {
+                continue;
+            }
+            Piece captured = board.get(move.destination());
+            // Check that also captures a major piece — double threat (被将军抽子)
+            if (captured != null && captured.color() == defender) {
+                int capVal = captureValue(board, captured, move.destination());
+                if (capVal >= value(PieceType.CANNON)) {
+                    danger += capVal * 3;
+                } else if (capVal >= value(PieceType.KNIGHT)) {
+                    danger += capVal * 2;
+                }
+            }
+            // Check that exposes or attacks another major piece
+            int exposedCount = 0;
+            for (Position pos : next.occupiedPositions()) {
+                if (exposedCount >= 3) break; // Only check up to 3 exposed pieces
+                Piece piece = next.get(pos);
+                if (piece == null || piece.color() != defender || knownType(piece) == PieceType.KING) {
+                    continue;
+                }
+                int pieceVal = pieceSearchValue(next, piece, pos);
+                if (pieceVal < value(PieceType.CANNON)) {
+                    continue;
+                }
+                if (attackersValue(next, pos, attacker) > 0 && defendersValue(next, pos, defender) == 0) {
+                    danger += pieceVal * 2;
+                    exposedCount++;
+                }
+            }
+        }
+        return Math.min(10_000, danger);
     }
 
     private int rookCannonBatteryThreatScore(Board board, PlayerColor defender) {
@@ -8004,6 +8271,124 @@ public class SearchAi {
             }
         }
         return lowest == Integer.MAX_VALUE ? 0 : lowest;
+    }
+
+    // Rook safety evaluation: detects trapped rooks, rooks with few safe squares,
+    // and rooks exposed to attack without adequate defense.
+    // Rook >> Cannon > Knight >> others in Jieqi, so rook safety is critical.
+    private int rookSafetyScore(Board board, PlayerColor color) {
+        int score = 0;
+        for (Position pos : board.occupiedPositions()) {
+            Piece piece = board.get(pos);
+            if (piece == null || piece.color() != color || knownType(piece) != PieceType.ROOK) {
+                continue;
+            }
+            int rookVal = pieceSearchValue(board, piece, pos);
+            int safeMoves = countSafeRookMoves(board, pos, color);
+            int attackers = attackersValue(board, pos, color.opponent());
+            int defenders = defendersValue(board, pos, color);
+            boolean onOpenFile = isOnOpenFile(board, pos, color);
+            boolean onOwnBackRank = isOnOwnBackRank(pos, color);
+
+            // Rook with very few safe squares is in danger of being trapped
+            if (safeMoves <= 1) {
+                score += rookVal * 3; // Severe: almost trapped
+                if (attackers > 0) {
+                    score += rookVal * 2; // Under attack AND trapped
+                }
+            } else if (safeMoves <= 3 && onOwnBackRank && !onOpenFile) {
+                score += rookVal * 2; // Confined to back rank, no open file
+            } else if (safeMoves <= 3) {
+                score += rookVal; // Limited mobility
+            }
+
+            // Undefended rook under attack
+            if (attackers > 0 && defenders == 0) {
+                score += rookVal * 2 + ROOK_RECAPTURE_PRIORITY_BONUS;
+                // If attacker is a lower-value piece, even worse
+                if (attackers <= value(PieceType.CANNON)) {
+                    score += rookVal; // Rook can be taken by cannon/knight/pawn
+                }
+            }
+
+            // Rook on back rank blocked by own pieces
+            if (onOwnBackRank) {
+                int blockingPieces = countBlockingPieces(board, pos, color);
+                if (blockingPieces >= 2) {
+                    score += rookVal / 2;
+                }
+            }
+        }
+        return Math.min(18_000, score);
+    }
+
+    private int countSafeRookMoves(Board board, Position rookPos, PlayerColor color) {
+        int safe = 0;
+        int[][] dirs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        for (int[] dir : dirs) {
+            int x = rookPos.x() + dir[0];
+            int y = rookPos.y() + dir[1];
+            while (Position.isInside(x, y)) {
+                Position target = new Position(x, y);
+                Piece occupant = board.get(target);
+                if (occupant != null) {
+                    if (occupant.color() != color && ruleEngine.canMoveAndKeepKingSafe(board, rookPos, target, color)) {
+                        safe++; // Can capture
+                    }
+                    break;
+                }
+                if (ruleEngine.canMoveAndKeepKingSafe(board, rookPos, target, color)) {
+                    safe++;
+                }
+                x += dir[0];
+                y += dir[1];
+            }
+        }
+        return safe;
+    }
+
+    private boolean isOnOpenFile(Board board, Position rookPos, PlayerColor color) {
+        int file = rookPos.x();
+        boolean hasOwnPawn = false;
+        boolean hasEnemyPawn = false;
+        for (int y = 0; y < Position.HEIGHT; y++) {
+            Piece piece = board.get(new Position(file, y));
+            if (piece != null && knownType(piece) == PieceType.PAWN) {
+                if (piece.color() == color) {
+                    hasOwnPawn = true;
+                } else {
+                    hasEnemyPawn = true;
+                }
+            }
+        }
+        return !hasOwnPawn && !hasEnemyPawn;
+    }
+
+    private boolean isOnOwnBackRank(Position pos, PlayerColor color) {
+        int backRank = color == PlayerColor.RED ? 0 : 9;
+        int secondRank = color == PlayerColor.RED ? 1 : 8;
+        return pos.y() == backRank || pos.y() == secondRank;
+    }
+
+    private int countBlockingPieces(Board board, Position rookPos, PlayerColor color) {
+        int count = 0;
+        int[][] dirs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        for (int[] dir : dirs) {
+            int x = rookPos.x() + dir[0];
+            int y = rookPos.y() + dir[1];
+            while (Position.isInside(x, y)) {
+                Piece occupant = board.get(new Position(x, y));
+                if (occupant != null) {
+                    if (occupant.color() == color && knownType(occupant) != PieceType.KING) {
+                        count++;
+                    }
+                    break;
+                }
+                x += dir[0];
+                y += dir[1];
+            }
+        }
+        return count;
     }
 
     private int hangingPieceScore(Board board, PlayerColor aiColor) {

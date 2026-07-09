@@ -225,6 +225,9 @@ public class JieqiWebServer {
             room.record.recordMove(color, move, result);
             appendReplayStep(room, color, move, result, capturedBeforeMove);
             recordDecision(room, color, learningPosition, move);
+            room.lastMoveSource = move.source().notation();
+            room.lastMoveDestination = move.destination().notation();
+            room.lastMoveWasCapture = result.capture();
             sendVisibleMoveMessages(room, playerId, color, moveMessage, result, capturedHiddenOpponentPiece);
             scheduleAiTurnIfNeeded(room, mode);
             updateScoreIfEnded(room);
@@ -470,6 +473,9 @@ public class JieqiWebServer {
         pair(sb, "gameStartTime", room.game.gameStartTime()).append(",");
         pair(sb, "gameElapsedMillis", room.game.gameElapsedMillis(now)).append(",");
         pair(sb, "recordFile", room.record.file().toString()).append(",");
+        pair(sb, "lastMoveSource", room.lastMoveSource).append(",");
+        pair(sb, "lastMoveDestination", room.lastMoveDestination).append(",");
+        pair(sb, "lastMoveWasCapture", room.lastMoveWasCapture).append(",");
         sb.append("\"messages\":[");
         for (int i = 0; i < messages.size(); i++) {
             if (i > 0) {
@@ -620,6 +626,9 @@ public class JieqiWebServer {
                 System.out.println("记录AI走子失败: " + e.getMessage());
             }
             appendReplayStep(room, aiColor, move, result, capturedBeforeMove);
+            room.lastMoveSource = move.source().notation();
+            room.lastMoveDestination = move.destination().notation();
+            room.lastMoveWasCapture = result.capture();
             sendVisibleMoveMessages(room, null, aiColor, MoveMessage.fromMove(move),
                     result, capturedHiddenOpponentPiece);
             recordDecision(room, aiColor, learningPosition, move);
@@ -1931,6 +1940,9 @@ public class JieqiWebServer {
         private final SearchAi searchAi = new SearchAi();
         private ReplaySnapshot currentReplay;
         private ReplaySnapshot lastReplay;
+        private String lastMoveSource = "";
+        private String lastMoveDestination = "";
+        private boolean lastMoveWasCapture = false;
 
         private Room(
                 String id,
@@ -2080,13 +2092,6 @@ public class JieqiWebServer {
                     header { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 16px; }
                     h1 { font-size: 24px; margin: 0; }
                     .status { color: #b7c0cc; font-size: 14px; }
-                    .check-banner {
-                      display: none; margin-top: 8px; width: fit-content;
-                      border: 1px solid rgba(244, 211, 94, .58); border-radius: 6px;
-                      background: rgba(244, 211, 94, .12); color: #f4d35e;
-                      padding: 5px 10px; font-weight: 900; letter-spacing: 2px;
-                    }
-                    .check-banner.visible { display: inline-flex; }
                     .metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 18px; }
                     .metric { border: 1px solid #30363d; background: #171a1f; border-radius: 6px; padding: 10px 12px; }
                     .metric .label { color: #8b949e; font-size: 12px; margin-bottom: 4px; }
@@ -2184,6 +2189,53 @@ public class JieqiWebServer {
                     .piece.selected { outline: 4px solid rgba(44,255,98,.82); outline-offset: 4px; box-shadow: 0 4px 0 #6b3a10, 0 0 0 5px rgba(44,255,98,.18), 0 10px 18px rgba(0,0,0,.55), inset 0 0 0 3px #dfa94c, inset 0 0 0 5px #2db45c, inset 0 0 0 8px rgba(89,48,12,.42), inset 0 3px 7px rgba(255,246,192,.62); }
                     .piece.capture-target { outline: 3px solid rgba(244, 211, 94, .82); outline-offset: 3px; }
                     .piece.legal-target { outline: 4px solid rgba(248, 113, 113, .92); outline-offset: 5px; box-shadow: 0 4px 0 #6b3a10, 0 0 0 7px rgba(220, 38, 38, .22), 0 10px 18px rgba(0,0,0,.55), inset 0 0 0 3px #dfa94c, inset 0 0 0 5px #2db45c, inset 0 0 0 8px rgba(89,48,12,.42), inset 0 3px 7px rgba(255,246,192,.62); }
+                    /* Move highlight markers */
+                    .move-marker {
+                      position: absolute; width: 20px; height: 20px; border-radius: 50%;
+                      transform: translate(-50%, -50%); z-index: 3; pointer-events: none;
+                      background: radial-gradient(circle, rgba(248,56,56,.95), rgba(180,20,20,.85));
+                      box-shadow: 0 0 12px rgba(248,56,56,.65), 0 0 4px rgba(220,40,40,.8);
+                      animation: markerPulse .6s ease-out;
+                    }
+                    .move-marker.dest {
+                      width: 28px; height: 28px; background: radial-gradient(circle, rgba(248,56,56,.85), transparent 70%);
+                      box-shadow: 0 0 16px rgba(248,56,56,.55), inset 0 0 0 3px rgba(248,56,56,.7);
+                      border-radius: 50%;
+                    }
+                    @keyframes markerPulse {
+                      from { transform: translate(-50%,-50%) scale(2.2); opacity: .3; }
+                      to { transform: translate(-50%,-50%) scale(1); opacity: 1; }
+                    }
+                    /* Check banner animation */
+                    .check-banner {
+                      display: none; margin-top: 8px; width: fit-content;
+                      border: 1px solid rgba(244, 211, 94, .58); border-radius: 6px;
+                      background: rgba(244, 211, 94, .12); color: #f4d35e;
+                      padding: 5px 10px; font-weight: 900; letter-spacing: 2px;
+                      animation: checkFlash .5s ease-in-out 3;
+                    }
+                    .check-banner.visible { display: inline-flex; }
+                    @keyframes checkFlash {
+                      0%, 100% { background: rgba(244, 211, 94, .12); }
+                      50% { background: rgba(244, 50, 50, .28); border-color: rgba(248, 56, 56, .7); }
+                    }
+                    /* Move counter badge */
+                    .move-badge {
+                      display: inline-block; background: #30363d; color: #b7c0cc;
+                      border-radius: 4px; padding: 2px 7px; font-size: 12px; font-weight: 700;
+                      margin-right: 5px;
+                    }
+                    /* Capture flash overlay */
+                    .capture-flash {
+                      position: absolute; width: 70px; height: 70px; border-radius: 50%;
+                      transform: translate(-50%, -50%); z-index: 4; pointer-events: none;
+                      background: radial-gradient(circle, rgba(248,180,56,.7), transparent 70%);
+                      animation: captureFlash .45s ease-out forwards;
+                    }
+                    @keyframes captureFlash {
+                      from { transform: translate(-50%,-50%) scale(.5); opacity: 1; }
+                      to { transform: translate(-50%,-50%) scale(2); opacity: 0; }
+                    }
                     .river-text { fill: rgba(197, 34, 28, .66); font: 900 28px "STKaiti", "KaiTi", "SimSun", serif; letter-spacing: 16px; filter: drop-shadow(0 1px 0 rgba(255,231,168,.45)); }
                     .panel { border: 1px solid #30363d; background: #171a1f; border-radius: 6px; padding: 14px; }
                     .panel h2 { margin: 0 0 10px; font-size: 16px; }
@@ -2364,9 +2416,95 @@ public class JieqiWebServer {
                   let recordsData = [];
                   let recordFilter = "all";
                   let selectedRecordFiles = new Set();
+                  let lastMove = null;  // {source, destination, wasCapture, wasCheck}
+                  let audioCtx = null;
                   const files = ["a","b","c","d","e","f","g","h","i"];
                   const CELL = 58;
                   const OFFSET = 22;
+
+                  // ===== Sound Effects via Web Audio API =====
+                  function getAudioCtx() {
+                    if (!audioCtx) {
+                      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    }
+                    return audioCtx;
+                  }
+
+                  function playSound(type) {
+                    // Resume context on first user gesture
+                    const ctx = getAudioCtx();
+                    if (ctx.state === 'suspended') ctx.resume();
+                    const now = ctx.currentTime;
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+
+                    switch (type) {
+                      case 'move':
+                        // Short click: high-pitched tap
+                        osc.type = 'sine';
+                        osc.frequency.setValueAtTime(800, now);
+                        osc.frequency.exponentialRampToValueAtTime(400, now + 0.06);
+                        gain.gain.setValueAtTime(0.18, now);
+                        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+                        osc.start(now); osc.stop(now + 0.08);
+                        break;
+                      case 'capture':
+                        // Strong thud: low punch
+                        osc.type = 'triangle';
+                        osc.frequency.setValueAtTime(220, now);
+                        osc.frequency.exponentialRampToValueAtTime(80, now + 0.18);
+                        gain.gain.setValueAtTime(0.35, now);
+                        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+                        osc.start(now); osc.stop(now + 0.22);
+                        // Add a noise burst for impact
+                        const osc2 = ctx.createOscillator();
+                        const gain2 = ctx.createGain();
+                        osc2.type = 'square';
+                        osc2.frequency.setValueAtTime(90, now);
+                        osc2.frequency.exponentialRampToValueAtTime(40, now + 0.10);
+                        gain2.gain.setValueAtTime(0.15, now);
+                        gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+                        osc2.connect(gain2);
+                        gain2.connect(ctx.destination);
+                        osc2.start(now); osc2.stop(now + 0.12);
+                        break;
+                      case 'check':
+                        // Alert: rising tone, repeated
+                        osc.type = 'sawtooth';
+                        osc.frequency.setValueAtTime(440, now);
+                        osc.frequency.linearRampToValueAtTime(880, now + 0.15);
+                        osc.frequency.setValueAtTime(440, now + 0.18);
+                        osc.frequency.linearRampToValueAtTime(880, now + 0.33);
+                        gain.gain.setValueAtTime(0.12, now);
+                        gain.gain.setValueAtTime(0.12, now + 0.04);
+                        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+                        osc.start(now); osc.stop(now + 0.35);
+                        break;
+                      case 'checkmate':
+                        // Descending tone: losing
+                        osc.type = 'triangle';
+                        osc.frequency.setValueAtTime(600, now);
+                        osc.frequency.exponentialRampToValueAtTime(100, now + 0.8);
+                        gain.gain.setValueAtTime(0.25, now);
+                        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.9);
+                        osc.start(now); osc.stop(now + 0.9);
+                        break;
+                      case 'start':
+                        // Short fanfare
+                        osc.type = 'sine';
+                        osc.frequency.setValueAtTime(523, now);
+                        osc.frequency.setValueAtTime(659, now + 0.1);
+                        osc.frequency.setValueAtTime(784, now + 0.2);
+                        gain.gain.setValueAtTime(0.2, now);
+                        gain.gain.setValueAtTime(0.2, now + 0.1);
+                        gain.gain.setValueAtTime(0.2, now + 0.2);
+                        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+                        osc.start(now); osc.stop(now + 0.4);
+                        break;
+                    }
+                  }
 
                   function roomIdKey(mode) {
                     return "jieqiRoomId_" + mode;
@@ -2783,6 +2921,43 @@ public class JieqiWebServer {
                     const previousState = lastState;
                     lastState = data;
                     lastStateLocalTime = Date.now();
+
+                    // Detect new move and trigger sounds
+                    const prevMoves = previousState ? (previousState.messages ? previousState.messages.length : 0) : 0;
+                    const currMoves = data.messages ? data.messages.length : 0;
+                    if (currMoves > prevMoves && previousState && data.status === "PLAYING") {
+                      const latestMsg = data.messages[data.messages.length - 1] || "";
+                      const wasCapture = latestMsg.includes("吃") || latestMsg.includes("capture");
+                      const givesCheck = data.currentInCheck;
+                      if (givesCheck && wasCapture) {
+                        playSound('checkmate');
+                      } else if (givesCheck) {
+                        playSound('check');
+                      } else if (wasCapture) {
+                        playSound('capture');
+                      } else {
+                        playSound('move');
+                      }
+                    }
+                    // Detect game over
+                    if (previousState && previousState.status === "PLAYING" && data.status !== "PLAYING") {
+                      if (data.status === "RED_WIN" || data.status === "BLACK_WIN") {
+                        playSound('checkmate');
+                      }
+                    }
+
+                    // Use server-provided last move data for highlights
+                    if (data.lastMoveSource && data.lastMoveDestination) {
+                      lastMove = {
+                        source: data.lastMoveSource,
+                        destination: data.lastMoveDestination,
+                        wasCapture: data.lastMoveWasCapture,
+                        wasCheck: data.currentInCheck
+                      };
+                    } else {
+                      lastMove = null;
+                    }
+
                     document.getElementById("status").textContent =
                       modeText(data.mode) + " · " + data.roomName + "，你是 " + colorText(data.yourColor)
                       + aiSeatText(data)
@@ -2811,6 +2986,14 @@ public class JieqiWebServer {
                       surface.appendChild(pointEl(cell));
                       if (!cell.empty) surface.appendChild(pieceEl(cell, previousBoard.get(cell.x + cell.y)));
                     }
+                    // Draw last-move markers
+                    if (lastMove) {
+                      surface.appendChild(moveMarkerEl(lastMove.source, 'src'));
+                      surface.appendChild(moveMarkerEl(lastMove.destination, 'dest'));
+                      if (lastMove.wasCapture) {
+                        surface.appendChild(captureFlashEl(lastMove.destination));
+                      }
+                    }
                     renderMessages(data.messages, data);
                   }
 
@@ -2832,17 +3015,23 @@ public class JieqiWebServer {
                     }
                     lastMessageSignature = signature;
                     log.innerHTML = "";
-                    messages.forEach(message => appendMessageLines(log, message, data.status));
+                    let moveNum = 0;
+                    messages.forEach((message, idx) => {
+                      const isRed = message.startsWith("红");
+                      const isBlack = message.startsWith("黑");
+                      if (isRed || isBlack) moveNum++;
+                      appendMessageLines(log, message, data.status, moveNum, isRed || isBlack);
+                    });
                     if (data.status === "PLAYING") {
                       if (data.currentInCheck) {
                         const checkLine = document.createElement("div");
                         checkLine.className = "log-line check-msg";
-                        checkLine.textContent = colorText(data.currentPlayer) + "被将军";
+                        checkLine.textContent = "⚠ " + colorText(data.currentPlayer) + "被将军 ⚠";
                         log.appendChild(checkLine);
                       }
                       const waiting = document.createElement("div");
                       waiting.className = "log-line waiting " + (data.currentPlayer === "red" ? "red-msg" : "black-msg");
-                      waiting.textContent = (data.currentPlayer === "red" ? "红方：" : "黑方：");
+                      waiting.textContent = "⏳ 等待" + colorText(data.currentPlayer) + "走子...";
                       log.appendChild(waiting);
                     } else if (terminalText) {
                       const resultLine = document.createElement("div");
@@ -2854,17 +3043,16 @@ public class JieqiWebServer {
                   }
 
                   function terminalResultText(status) {
-                    if (status === "RED_WIN") return "本局结果：红方获胜";
-                    if (status === "BLACK_WIN") return "本局结果：黑方获胜";
-                    if (status === "DRAW") return "本局结果：和棋";
+                    if (status === "RED_WIN") return "🏆 本局结果：红方获胜";
+                    if (status === "BLACK_WIN") return "🏆 本局结果：黑方获胜";
+                    if (status === "DRAW") return "🤝 本局结果：和棋";
                     return "";
                   }
 
-                  function appendMessageLines(log, message, status) {
+                  function appendMessageLines(log, message, status, moveNum, isMove) {
                     let text = message;
-                    const isRed = text.startsWith("红");
-                    const isBlack = text.startsWith("黑");
                     const check = text.includes("将军");
+                    const capture = text.includes("吃");
                     text = text
                       .replace("，被将军", "")
                       .replace("被将军", "")
@@ -2873,20 +3061,29 @@ public class JieqiWebServer {
                       .trim();
                     const line = document.createElement("div");
                     line.className = "log-line " + messageClass(message);
-                    if (isRed) {
-                      line.textContent = "红方：" + text.slice(1);
-                    } else if (isBlack) {
-                      line.textContent = "黑方：" + text.slice(1);
+                    // Add move number badge for moves
+                    let prefix = "";
+                    if (isMove && moveNum > 0) {
+                      prefix = '<span class="move-badge">' + moveNum + '</span>';
+                    }
+                    // Add icons
+                    let icon = "";
+                    if (capture) icon = "⚔ ";
+                    if (check) icon = "👑⚡ ";
+                    if (message.startsWith("红")) {
+                      line.innerHTML = prefix + icon + "红方：" + text.slice(1);
+                    } else if (message.startsWith("黑")) {
+                      line.innerHTML = prefix + icon + "黑方：" + text.slice(1);
                     } else {
                       line.textContent = text;
                     }
-                    if (line.textContent) {
+                    if (line.textContent || line.innerHTML) {
                       log.appendChild(line);
                     }
                     if (check && status === "PLAYING") {
                       const checkLine = document.createElement("div");
                       checkLine.className = "log-line check-msg";
-                      checkLine.textContent = "将军";
+                      checkLine.textContent = "👑 将军！";
                       log.appendChild(checkLine);
                     }
                   }
@@ -2979,6 +3176,19 @@ public class JieqiWebServer {
                       selected = selected === pos ? null : pos;
                       document.getElementById("source").value = selected || "";
                       document.getElementById("destination").value = "";
+                      if (selected) {
+                        // Soft click when selecting a piece
+                        const ctx = getAudioCtx();
+                        if (ctx.state === 'suspended') ctx.resume();
+                        const osc = ctx.createOscillator();
+                        const gain = ctx.createGain();
+                        osc.connect(gain); gain.connect(ctx.destination);
+                        osc.type = 'sine';
+                        osc.frequency.setValueAtTime(1200, ctx.currentTime);
+                        gain.gain.setValueAtTime(0.08, ctx.currentTime);
+                        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.05);
+                        osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.05);
+                      }
                       render(lastState);
                       return;
                     }
@@ -3022,6 +3232,32 @@ public class JieqiWebServer {
                     const displayY = isBlackPerspective(lastState) ? rank : 9 - rank;
                     el.style.left = (OFFSET + displayX * CELL) + "px";
                     el.style.top = (OFFSET + displayY * CELL) + "px";
+                  }
+
+                  function moveMarkerEl(notation, cls) {
+                    const el = document.createElement("div");
+                    el.className = "move-marker" + (cls ? " " + cls : "");
+                    const x = notation[0];
+                    const y = parseInt(notation[1]);
+                    const sourceX = files.indexOf(x);
+                    const displayX = isBlackPerspective(lastState) ? 8 - sourceX : sourceX;
+                    const displayY = isBlackPerspective(lastState) ? y : 9 - y;
+                    el.style.left = (OFFSET + displayX * CELL) + "px";
+                    el.style.top = (OFFSET + displayY * CELL) + "px";
+                    return el;
+                  }
+
+                  function captureFlashEl(notation) {
+                    const el = document.createElement("div");
+                    el.className = "capture-flash";
+                    const x = notation[0];
+                    const y = parseInt(notation[1]);
+                    const sourceX = files.indexOf(x);
+                    const displayX = isBlackPerspective(lastState) ? 8 - sourceX : sourceX;
+                    const displayY = isBlackPerspective(lastState) ? y : 9 - y;
+                    el.style.left = (OFFSET + displayX * CELL) + "px";
+                    el.style.top = (OFFSET + displayY * CELL) + "px";
+                    return el;
                   }
 
                   function isBlackPerspective(data) {
@@ -3117,7 +3353,37 @@ public class JieqiWebServer {
                     for (const cell of boardCells) {
                       if (!cell.empty) surface.appendChild(replayPieceEl(cell));
                     }
+                    // Show move markers for current replay step
+                    if (frame && frame.source && frame.destination) {
+                      surface.appendChild(replayMarkerEl(frame.source, 'src'));
+                      surface.appendChild(replayMarkerEl(frame.destination, 'dest'));
+                      if (frame.capture) {
+                        surface.appendChild(replayFlashEl(frame.destination));
+                      }
+                    }
                     renderReplayMessages();
+                  }
+
+                  function replayMarkerEl(notation, cls) {
+                    const el = document.createElement("div");
+                    el.className = "move-marker" + (cls ? " " + cls : "");
+                    const x = notation[0];
+                    const y = parseInt(notation[1]);
+                    const sourceX = files.indexOf(x);
+                    el.style.left = (OFFSET + sourceX * CELL) + "px";
+                    el.style.top = (OFFSET + (9 - y) * CELL) + "px";
+                    return el;
+                  }
+
+                  function replayFlashEl(notation) {
+                    const el = document.createElement("div");
+                    el.className = "capture-flash";
+                    const x = notation[0];
+                    const y = parseInt(notation[1]);
+                    const sourceX = files.indexOf(x);
+                    el.style.left = (OFFSET + sourceX * CELL) + "px";
+                    el.style.top = (OFFSET + (9 - y) * CELL) + "px";
+                    return el;
                   }
 
                   function replayPieceEl(cell) {
@@ -3142,13 +3408,16 @@ public class JieqiWebServer {
                     log.innerHTML = "";
                     const initial = document.createElement("div");
                     initial.className = "log-line system-msg";
-                    initial.textContent = "初始局面：暗子真身已用于复盘显示。";
+                    initial.textContent = "📋 初始局面：暗子真身已用于复盘显示。";
                     log.appendChild(initial);
                     for (let i = 0; i < replayIndex; i++) {
                       const step = replayData.steps[i];
                       const line = document.createElement("div");
                       line.className = "log-line " + (step.color === "red" ? "red-msg" : "black-msg");
-                      line.textContent = step.turn + ". " + colorText(step.color) + " " + step.source + "-" + step.destination
+                      let icon = step.capture ? "⚔ " : "";
+                      if (step.message && step.message.includes("将军")) icon = "👑⚡ ";
+                      line.innerHTML = '<span class="move-badge">' + step.turn + '</span> '
+                        + icon + colorText(step.color) + " " + step.source + " → " + step.destination
                         + (step.capture ? "，吃" + colorText(step.capturedColor) + pieceTypeText(step.capturedType)
                           + (step.capturedHidden ? "（暗子）" : "") : "");
                       log.appendChild(line);
