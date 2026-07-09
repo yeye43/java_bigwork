@@ -120,6 +120,7 @@ public class SearchAi {
     private static final int NO_FOLLOWUP_DRIFT_PENALTY = 2_700;
     private static final int EARLY_MAJOR_INVASION_BONUS = 2_300;
     private static final int MAJOR_OFFENSIVE_COORDINATION_BONUS = 1_900;
+    private static final int ROOK_CANNON_DEEP_INVASION_BONUS = 2_800;
     private static final int SAME_TYPE_COORDINATION_BONUS = 1_450;
     private static final int PALACE_HIDDEN_ACTIVATION_BONUS = 1_650;
     private static final int PHASE_STRATEGY_BONUS = 1_550;
@@ -271,6 +272,10 @@ public class SearchAi {
             }
             if (depth >= 4 && bestMargin >= confidentMargin(board, color)
                     && elapsed >= confidentStopMillis(board, color, criticalPosition)) {
+                break;
+            }
+            if (!criticalPosition && depth >= 3 && stableBestDepths >= 1
+                    && elapsed >= config.longValue("search.stableBestMillis", STABLE_BEST_SEARCH_MILLIS)) {
                 break;
             }
             if (!criticalPosition && depth >= 4 && stableBestDepths >= 1
@@ -1623,6 +1628,7 @@ public class SearchAi {
             score += Math.min(defenders, movedValue) / 8;
         }
         score += mobilityDelta(board, next, color) * 3;
+        score += rookCannonDeepInvasionScore(board, next, move, color);
         return score;
     }
 
@@ -2002,6 +2008,77 @@ public class SearchAi {
             score = score * 7 / 10;
         }
         return Math.max(0, Math.min(EARLY_MAJOR_INVASION_BONUS, score));
+    }
+
+    private int rookCannonDeepInvasionScore(Board before, Board after, Move move, PlayerColor color) {
+        Piece mover = before.get(move.source());
+        Piece moved = after.get(move.destination());
+        if (mover == null || moved == null || !moved.visible()) {
+            return 0;
+        }
+        PieceType type = knownType(moved);
+        if (type != PieceType.ROOK && type != PieceType.CANNON) {
+            return 0;
+        }
+        if (ruleEngine.isInCheck(after, color)) {
+            return 0;
+        }
+
+        int rankBefore = forwardRank(move.source(), color);
+        int rankAfter = forwardRank(move.destination(), color);
+        int rankGain = rankAfter - rankBefore;
+        boolean entersOpponentSide = !isOpponentSide(move.source(), color) && isOpponentSide(move.destination(), color);
+        boolean staysDeep = isOpponentSide(move.destination(), color) && rankAfter >= 5;
+        if (rankGain <= 0 && !staysDeep) {
+            return 0;
+        }
+
+        int movedValue = pieceSearchValue(after, moved, move.destination());
+        int replyLoss = directReplyCaptureLoss(after, move, color, movedValue);
+        Piece captured = before.get(move.destination());
+        int capturedValue = captured == null ? 0 : captureValue(before, captured, move.destination());
+        if (replyLoss > Math.max(capturedValue + 260, movedValue / 2)
+                && defendersValue(after, move.destination(), color) == 0) {
+            return 0;
+        }
+
+        int score = 0;
+        score += Math.max(0, rankGain) * (type == PieceType.ROOK ? 520 : 380);
+        if (entersOpponentSide) {
+            score += type == PieceType.ROOK ? 1_050 : 760;
+        } else if (staysDeep) {
+            score += type == PieceType.ROOK ? 620 : 460;
+        }
+
+        Position enemyKing = before.findKing(color.opponent());
+        if (enemyKing != null) {
+            int beforeDistance = manhattan(move.source(), enemyKing);
+            int afterDistance = manhattan(move.destination(), enemyKing);
+            if (afterDistance < beforeDistance) {
+                score += (beforeDistance - afterDistance) * (type == PieceType.ROOK ? 220 : 170);
+            }
+            if (sameFileOrRank(move.destination(), enemyKing)) {
+                int between = after.countBetween(move.destination(), enemyKing);
+                if (type == PieceType.ROOK && between <= 1) {
+                    score += 1_050;
+                } else if (type == PieceType.CANNON && between == 1) {
+                    score += 1_150;
+                } else if (between <= 2) {
+                    score += 420;
+                }
+            }
+        }
+
+        int hiddenTargets = majorHiddenTargets(after, move.destination(), color);
+        score += Math.min(1_200, hiddenTargets * (type == PieceType.ROOK ? 360 : 260));
+        if (type == PieceType.CANNON) {
+            score += Math.max(0, cannonScreenScore(after, color) - cannonScreenScore(before, color)) / 2;
+        }
+        if (captured != null && captured.color() == color.opponent()) {
+            score += Math.min(900, capturedValue / 2);
+        }
+        score -= Math.max(0, replyLoss - capturedValue) / 2;
+        return Math.max(0, Math.min(ROOK_CANNON_DEEP_INVASION_BONUS, score));
     }
 
     private int majorOffensiveCoordinationProgressScore(Board before, Board after, Move move, PlayerColor color) {

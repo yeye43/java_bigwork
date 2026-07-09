@@ -51,7 +51,7 @@ public class JieqiWebServer {
     private static final String MODE_ONLINE = "online";
     private static final String MODE_AI = "ai";
     private static final long AI_MOVE_DELAY_MILLIS = 0;
-    private static final long AI_THINK_MILLIS = 12_000;
+    private static final long AI_THINK_MILLIS = 8_000;
     private static final Path RECORDS_DIR = Path.of("records");
     private static final Path HIDDEN_RECORDS_FILE = RECORDS_DIR.resolve("hidden-records.txt");
     private static final String RECORD_DELETE_PASSWORD = "131415";
