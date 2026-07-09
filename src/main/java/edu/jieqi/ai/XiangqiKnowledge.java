@@ -15,7 +15,8 @@ public class XiangqiKnowledge {
         for (Position position : board.occupiedPositions()) {
             Piece piece = board.get(position);
             int side = piece.color() == color ? 1 : -1;
-            int visibleWeight = piece.visible() ? 100 : 35;
+            // Higher hidden weight in early/mid game — hidden pieces have significant potential value
+            int visibleWeight = piece.visible() ? 100 : (60 + (100 - phase) / 4);
             int pieceScore = pieceSquare(piece, position, phase);
             pieceScore += structure(board, piece, position, phase);
             score += side * pieceScore * visibleWeight / 100;
@@ -34,6 +35,9 @@ public class XiangqiKnowledge {
         score -= knightFreedom(board, color.opponent(), rules);
         score += (generator.generateActions(board, color, 0).size()
                 - generator.generateActions(board, color.opponent(), 0).size()) * (2 + phase / 35);
+        // Bonus for hidden pieces near enemy king in midgame — potential for surprise attacks
+        score += hiddenPieceInvasionPressure(board, color, phase);
+        score -= hiddenPieceInvasionPressure(board, color.opponent(), phase);
         return score;
     }
 
@@ -388,5 +392,46 @@ public class XiangqiKnowledge {
                 ? position.y() >= 0 && position.y() <= 2
                 : position.y() >= 7 && position.y() <= 9;
         return xOk && yOk;
+    }
+
+    // In Jieqi, hidden guards and bishops can cross the river — this creates
+    // invasion pressure that standard xiangqi evaluation doesn't capture.
+    private int hiddenPieceInvasionPressure(Board board, PlayerColor color, int phase) {
+        if (phase >= 75) {
+            return 0; // late endgame — hidden pieces already accounted for
+        }
+        int score = 0;
+        Position king = board.findKing(color.opponent());
+        if (king == null) {
+            return 0;
+        }
+        for (Position position : board.occupiedPositions()) {
+            Piece piece = board.get(position);
+            if (piece == null || piece.color() != color || piece.visible()) {
+                continue;
+            }
+            PieceType moveType = piece.hiddenMoveType();
+            int rank = forwardRank(color, position);
+            int fileCenter = 4 - Math.abs(position.x() - 4);
+            int distToKing = Math.abs(position.x() - king.x()) + Math.abs(position.y() - king.y());
+            int proximityBonus = Math.max(0, 14 - distToKing) * 12;
+
+            // Hidden pieces on the opponent's side are more threatening
+            boolean onOpponentSide = color == PlayerColor.RED ? position.y() >= 5 : position.y() <= 4;
+            int invasionBonus = onOpponentSide ? 85 + rank * 6 : 0;
+
+            // Specific bonuses based on what the hidden piece could be
+            int pieceTypeBonus = switch (moveType) {
+                case ROOK -> 180 + proximityBonus + rank * 14;
+                case CANNON -> 145 + proximityBonus + rank * 10;
+                case KNIGHT -> 120 + proximityBonus;
+                case PAWN -> 70 + (rank >= 5 ? rank * 8 : 0);
+                case GUARD, BISHOP -> onOpponentSide ? 65 : 15;
+                case KING -> 0;
+            };
+
+            score += pieceTypeBonus + invasionBonus;
+        }
+        return score * (110 - phase) / 120;
     }
 }

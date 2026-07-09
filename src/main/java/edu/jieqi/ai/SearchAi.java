@@ -24,17 +24,20 @@ import java.io.IOException;
 
 public class SearchAi {
     private static final int MAX_DEPTH = 5;
+    private static final int NORMAL_MAX_DEPTH = 4;
     private static final int WIN_SCORE = 1_000_000;
     private static final int CHECK_BONUS = 1_350;
     private static final int SELF_CHECK_PENALTY = 4_000;
-    private static final int REVEAL_BONUS = 520;
+    private static final int REVEAL_BONUS = 680;
     private static final int ATTACK_BONUS = 24;
     private static final int MAX_BRANCHING = 36;
+    private static final int NON_CRITICAL_MAX_BRANCHING = 28;
     private static final int STOCHASTIC_MARGIN = 180;
     private static final int BAD_EXCHANGE_PENALTY = 5;
     private static final int HIGH_VALUE_PIECE = 420;
     private static final int QUIESCENCE_DEPTH = 3;
     private static final int QUIESCENCE_BRANCHING = 18;
+    private static final int NON_CRITICAL_QUIESCENCE_BRANCHING = 12;
     private static final int EXTENSION_LIMIT = 2;
     private static final int TRANSPOSITION_LIMIT = 120_000;
     private static final int HISTORY_LIMIT = 18_000;
@@ -45,9 +48,11 @@ public class SearchAi {
     private static final int HIDDEN_EXPECT_PLY_LIMIT = 2;
     private static final int LMR_MIN_DEPTH = 3;
     private static final int LMR_MOVE_INDEX = 8;
+    private static final int FUTILITY_MARGIN_BASE = 380;
+    private static final int[] FUTILITY_MARGINS = {0, 380, 720, 1_200};
     private static final int PASSIVE_KING_MOVE_PENALTY = 4_800;
-    private static final int XIANGQI_KNOWLEDGE_START_PHASE = 30;
-    private static final int XIANGQI_KNOWLEDGE_FULL_PHASE = 78;
+    private static final int XIANGQI_KNOWLEDGE_START_PHASE = 18;
+    private static final int XIANGQI_KNOWLEDGE_FULL_PHASE = 68;
     private static final int REVEAL_QUIESCENCE_PHASE = 55;
     private static final int REPLY_THREAT_PENALTY = 2;
     private static final int FOLLOWUP_THREAT_BONUS = 3;
@@ -107,11 +112,11 @@ public class SearchAi {
     private static final int ADAPTIVE_TEMPO_BONUS = 1_300;
     private static final int RECORD_STRUCTURE_BONUS = 1_150;
     private static final int HIDDEN_ONE_SHOT_PRESERVE_BONUS = 1_650;
-    private static final int DARK_UNCERTAIN_EXCHANGE_EXTRA_PENALTY = 3_400;
-    private static final int DARK_RECAPTURE_RISK_PENALTY = 5_200;
+    private static final int DARK_UNCERTAIN_EXCHANGE_EXTRA_PENALTY = 2_200;
+    private static final int DARK_RECAPTURE_RISK_PENALTY = 3_400;
     private static final int ROOK_RECAPTURE_PRIORITY_BONUS = 1_250;
-    private static final int BAD_TRADE_HIERARCHY_PENALTY = 5_600;
-    private static final int UNSOUND_MAJOR_TRADE_CHECK_PENALTY = 7_200;
+    private static final int BAD_TRADE_HIERARCHY_PENALTY = 4_200;
+    private static final int UNSOUND_MAJOR_TRADE_CHECK_PENALTY = 5_400;
     private static final int CONTINUATION_TRADE_LOSS_PENALTY = 4_800;
     private static final int MAJOR_SAFETY_PRIORITY_PENALTY = 4_600;
     private static final int ILLUSORY_MAJOR_THREAT_PENALTY = 3_400;
@@ -120,7 +125,6 @@ public class SearchAi {
     private static final int NO_FOLLOWUP_DRIFT_PENALTY = 2_700;
     private static final int EARLY_MAJOR_INVASION_BONUS = 2_300;
     private static final int MAJOR_OFFENSIVE_COORDINATION_BONUS = 1_900;
-    private static final int ROOK_CANNON_DEEP_INVASION_BONUS = 2_800;
     private static final int SAME_TYPE_COORDINATION_BONUS = 1_450;
     private static final int PALACE_HIDDEN_ACTIVATION_BONUS = 1_650;
     private static final int PHASE_STRATEGY_BONUS = 1_550;
@@ -131,18 +135,21 @@ public class SearchAi {
     private static final int BACK_RANK_MAJOR_DRIFT_PENALTY = 2_600;
     private static final int EARLY_NON_DECISIVE_CHECK_PENALTY = 2_400;
     private static final int ROOK_HORIZONTAL_DRIFT_PENALTY = 2_200;
-    private static final int HIDDEN_RECAPTURE_UNCERTAIN_TRADE_PENALTY = 4_200;
+    private static final int HIDDEN_RECAPTURE_UNCERTAIN_TRADE_PENALTY = 2_800;
     private static final int NEAR_KING_MINOR_DRIFT_PENALTY = 1_900;
     private static final int HARASS_CHECK_PENALTY = 3_200;
     private static final int EXCHANGE_SEQUENCE_DEPTH = 8;
     private static final int MATE_SEARCH_DEPTH = 4;
     private static final int MATE_SEARCH_BRANCHING = 18;
     private static final int LATE_MAJOR_PHASE = 58;
-    private static final long MIN_SEARCH_MILLIS = 600;
-    private static final long MAX_ADAPTIVE_SEARCH_MILLIS = 10_500;
-    private static final long NORMAL_POSITION_SEARCH_MILLIS = 5_200;
-    private static final long CRITICAL_POSITION_SEARCH_MILLIS = 10_500;
-    private static final long STABLE_BEST_SEARCH_MILLIS = 2_200;
+    private static final long MIN_SEARCH_MILLIS = 500;
+    private static final long MAX_ADAPTIVE_SEARCH_MILLIS = 8_000;
+    private static final long NORMAL_POSITION_SEARCH_MILLIS = 4_200;
+    private static final long CRITICAL_POSITION_SEARCH_MILLIS = 8_000;
+    private static final long STABLE_BEST_SEARCH_MILLIS = 1_800;
+    private static final int JIEQI_EARLY_GAME_PHASE = 30;
+    private static final int JIEQI_OPENING_MAJOR_PENALTY = 750;
+    private static final int JIEQI_OPENING_PAWN_BONUS = 320;
 
     private final RuleEngine ruleEngine = new RuleEngine();
     private final MoveGenerator moveGenerator = new MoveGenerator(ruleEngine);
@@ -161,6 +168,8 @@ public class SearchAi {
                     return size() > TRANSPOSITION_LIMIT;
                 }
             };
+    private final Map<String, Integer> evalCache = new HashMap<>();
+    private static final int EVAL_CACHE_LIMIT = 24_000;
 
     public SearchAi() {
         this(null);
@@ -187,6 +196,9 @@ public class SearchAi {
             historyScores.clear();
         }
         heuristicScores.clear();
+        if (evalCache.size() > EVAL_CACHE_LIMIT) {
+            evalCache.clear();
+        }
         List<Move> actions = orderedMoves(board, color, turnStartTime);
         if (actions.isEmpty()) {
             return null;
@@ -245,12 +257,14 @@ public class SearchAi {
         long budgetMillis = adaptiveThinkMillis(board, actions, color, thinkMillis);
         long deadline = startedAt + budgetMillis;
         boolean criticalPosition = criticalThinkPosition(board, color);
+        boolean needsDeep = needsDeepEndgameSearch(board, color);
+        int effectiveMaxDepth = (criticalPosition || needsDeep) ? MAX_DEPTH : NORMAL_MAX_DEPTH;
         Move best = actions.get(0);
         int bestScore = Integer.MIN_VALUE;
         int bestMargin = 0;
         Move previousBest = null;
         int stableBestDepths = 0;
-        for (int depth = 1; depth <= MAX_DEPTH; depth++) {
+        for (int depth = 1; depth <= effectiveMaxDepth; depth++) {
             SearchResult result = searchRoot(board, color, actions, depth, deadline, rootPenalty, previousBest);
             if (result.timedOut()) {
                 break;
@@ -278,15 +292,14 @@ public class SearchAi {
                     && elapsed >= config.longValue("search.stableBestMillis", STABLE_BEST_SEARCH_MILLIS)) {
                 break;
             }
-            if (!criticalPosition && depth >= 4 && stableBestDepths >= 1
-                    && elapsed >= config.longValue("search.stableBestMillis", STABLE_BEST_SEARCH_MILLIS)) {
-                break;
-            }
-            if (!criticalPosition && depth >= 4 && elapsed >= config.longValue("search.minMillis", MIN_SEARCH_MILLIS)) {
+            if (!criticalPosition && depth >= 3 && elapsed >= config.longValue("search.minMillis", MIN_SEARCH_MILLIS)) {
                 break;
             }
             if (criticalPosition && depth >= 4 && stableBestDepths >= 1
                     && elapsed >= config.longValue("search.stableBestMillis", STABLE_BEST_SEARCH_MILLIS) + 2_500) {
+                break;
+            }
+            if (!criticalPosition && !needsDeep && depth >= effectiveMaxDepth) {
                 break;
             }
         }
@@ -326,13 +339,13 @@ public class SearchAi {
         long criticalMaxMillis = config.longValue("search.criticalMaxMillis", CRITICAL_POSITION_SEARCH_MILLIS);
         long maxMillis = Math.min(configuredMaxMillis, criticalPosition ? criticalMaxMillis : normalMaxMillis);
         long budget = minMillis
-                + hiddenPhase * 32L
-                + actionCount * 58L;
+                + hiddenPhase * 24L
+                + actionCount * 42L;
         if (ruleEngine.isInCheck(board, color)) {
             budget += 1_400;
         }
         if (criticalPosition) {
-            budget += 2_700;
+            budget += 2_200;
         }
         int planDanger = opponentPlanThreatScore(board, color);
         if (planDanger >= 5_000) {
@@ -943,20 +956,33 @@ public class SearchAi {
             int extensionsRemaining,
             PlayerColor hiddenColor) {
         Map<PieceType, Integer> counts = remainingHiddenTypeCounts(board, hiddenColor);
+        // Optimized: only do full search for top-value types, approximate the rest
         int total = 0;
         int weightedScore = 0;
-        for (Map.Entry<PieceType, Integer> entry : counts.entrySet()) {
-            if (entry.getValue() <= 0 || entry.getKey() == PieceType.KING) {
+        PieceType[] priorityTypes = {PieceType.ROOK, PieceType.CANNON, PieceType.KNIGHT,
+                PieceType.PAWN, PieceType.GUARD, PieceType.BISHOP};
+        int fullSearchCount = 0;
+        for (PieceType pieceType : priorityTypes) {
+            int count = counts.getOrDefault(pieceType, 0);
+            if (count <= 0) {
                 continue;
             }
             if (System.currentTimeMillis() >= deadline) {
                 break;
             }
-            Board next = applyForSearch(board, move, entry.getKey());
-            int score = minimaxAfterMove(next, nextSide, aiColor, depth, alpha, beta,
-                    deadline, ply, extensionsRemaining);
-            total += entry.getValue();
-            weightedScore += score * entry.getValue();
+            int score;
+            if (fullSearchCount < 3) {
+                // Full minimax search for top 3 most valuable types
+                Board next = applyForSearch(board, move, pieceType);
+                score = minimaxAfterMove(next, nextSide, aiColor, depth, alpha, beta,
+                        deadline, ply, extensionsRemaining);
+                fullSearchCount++;
+            } else {
+                // Fast approximation for remaining types
+                score = evaluate(applyForSearch(board, move, pieceType), aiColor);
+            }
+            total += count;
+            weightedScore += score * count;
         }
         if (total == 0) {
             Board next = applyForSearch(board, move);
@@ -1045,12 +1071,16 @@ public class SearchAi {
             }
         }
 
+        boolean inCheck = ruleEngine.isInCheck(board, sideToMove);
+        int futilityMargin = depth <= 1 && !inCheck ? FUTILITY_MARGINS[Math.min(depth, FUTILITY_MARGINS.length - 1)] : Integer.MAX_VALUE;
+
         List<Move> actions = orderedMoves(board, sideToMove, System.currentTimeMillis(), ply, hashMove);
-        if (depth >= 2 && actions.size() > MAX_BRANCHING) {
-            actions = actions.subList(0, MAX_BRANCHING);
+        int maxBranching = criticalThinkPosition(board, aiColor) || inCheck ? MAX_BRANCHING : NON_CRITICAL_MAX_BRANCHING;
+        if (depth >= 2 && actions.size() > maxBranching) {
+            actions = actions.subList(0, maxBranching);
         }
         if (actions.isEmpty()) {
-            int score = ruleEngine.isInCheck(board, sideToMove) ? WIN_SCORE / 2 : 35_000;
+            int score = inCheck ? WIN_SCORE / 2 : 35_000;
             return sideToMove == aiColor ? -score : score;
         }
 
@@ -1059,7 +1089,15 @@ public class SearchAi {
             Move bestMove = null;
             boolean first = true;
             int moveIndex = 0;
+            int staticEval = depth <= 1 && !inCheck ? evaluate(board, aiColor) : 0;
             for (Move move : actions) {
+                if (depth <= 1 && !inCheck && moveIndex >= 2
+                        && staticEval + futilityMargin <= alpha
+                        && board.get(move.destination()) == null
+                        && !ruleEngine.isInCheck(applyForSearch(board, move), sideToMove.opponent())) {
+                    moveIndex++;
+                    continue;
+                }
                 boolean reduced = useLateMoveReduction(board, move, sideToMove, depth, moveIndex, ply);
                 int searchDepth = reduced ? depth - 1 : depth;
                 int score;
@@ -1098,7 +1136,15 @@ public class SearchAi {
             Move bestMove = null;
             boolean first = true;
             int moveIndex = 0;
+            int staticEval = depth <= 1 && !inCheck ? evaluate(board, aiColor) : 0;
             for (Move move : actions) {
+                if (depth <= 1 && !inCheck && moveIndex >= 2
+                        && staticEval - futilityMargin >= beta
+                        && board.get(move.destination()) == null
+                        && !ruleEngine.isInCheck(applyForSearch(board, move), sideToMove.opponent())) {
+                    moveIndex++;
+                    continue;
+                }
                 boolean reduced = useLateMoveReduction(board, move, sideToMove, depth, moveIndex, ply);
                 int searchDepth = reduced ? depth - 1 : depth;
                 int score;
@@ -1259,7 +1305,29 @@ public class SearchAi {
         score += immediateThreatScore(next, color) / FOLLOWUP_THREAT_BONUS;
         score -= immediateThreatScore(next, color.opponent()) / REPLY_THREAT_PENALTY;
         score += experienceBonus(board, move);
+        score += jieqiOpeningGuidance(board, move, color);
         return score;
+    }
+
+    // Jieqi opening strategy: avoid prematurely revealing Rook/Cannon position hidden pieces,
+    // prioritize revealing pawn-position pieces first.
+    private int jieqiOpeningGuidance(Board board, Move move, PlayerColor color) {
+        int visiblePhase = visiblePhase(board);
+        if (visiblePhase > JIEQI_EARLY_GAME_PHASE) {
+            return 0;
+        }
+        Piece mover = board.get(move.source());
+        if (mover == null || mover.visible()) {
+            return 0;
+        }
+        PieceType moveType = mover.hiddenMoveType();
+        int earlyGameWeight = (JIEQI_EARLY_GAME_PHASE - visiblePhase) * 100 / JIEQI_EARLY_GAME_PHASE;
+        return switch (moveType) {
+            case ROOK, CANNON -> -(JIEQI_OPENING_MAJOR_PENALTY - 120) * earlyGameWeight / 100;
+            case PAWN -> JIEQI_OPENING_PAWN_BONUS * earlyGameWeight / 100;
+            case BISHOP -> JIEQI_OPENING_PAWN_BONUS * earlyGameWeight / 200;
+            default -> 0;
+        };
     }
 
     private int revealMoveScore(Board before, Move move, PlayerColor color, Board after) {
@@ -1355,8 +1423,9 @@ public class SearchAi {
         List<Move> actions = inCheck
                 ? orderedMoves(board, sideToMove, System.currentTimeMillis(), ply)
                 : tacticalMoves(board, sideToMove, ply);
-        if (actions.size() > QUIESCENCE_BRANCHING) {
-            actions = actions.subList(0, QUIESCENCE_BRANCHING);
+        int qBranching = inCheck || criticalThinkPosition(board, aiColor) ? QUIESCENCE_BRANCHING : NON_CRITICAL_QUIESCENCE_BRANCHING;
+        if (actions.size() > qBranching) {
+            actions = actions.subList(0, qBranching);
         }
         if (actions.isEmpty()) {
             if (inCheck) {
@@ -1628,7 +1697,6 @@ public class SearchAi {
             score += Math.min(defenders, movedValue) / 8;
         }
         score += mobilityDelta(board, next, color) * 3;
-        score += rookCannonDeepInvasionScore(board, next, move, color);
         return score;
     }
 
@@ -2008,77 +2076,6 @@ public class SearchAi {
             score = score * 7 / 10;
         }
         return Math.max(0, Math.min(EARLY_MAJOR_INVASION_BONUS, score));
-    }
-
-    private int rookCannonDeepInvasionScore(Board before, Board after, Move move, PlayerColor color) {
-        Piece mover = before.get(move.source());
-        Piece moved = after.get(move.destination());
-        if (mover == null || moved == null || !moved.visible()) {
-            return 0;
-        }
-        PieceType type = knownType(moved);
-        if (type != PieceType.ROOK && type != PieceType.CANNON) {
-            return 0;
-        }
-        if (ruleEngine.isInCheck(after, color)) {
-            return 0;
-        }
-
-        int rankBefore = forwardRank(move.source(), color);
-        int rankAfter = forwardRank(move.destination(), color);
-        int rankGain = rankAfter - rankBefore;
-        boolean entersOpponentSide = !isOpponentSide(move.source(), color) && isOpponentSide(move.destination(), color);
-        boolean staysDeep = isOpponentSide(move.destination(), color) && rankAfter >= 5;
-        if (rankGain <= 0 && !staysDeep) {
-            return 0;
-        }
-
-        int movedValue = pieceSearchValue(after, moved, move.destination());
-        int replyLoss = directReplyCaptureLoss(after, move, color, movedValue);
-        Piece captured = before.get(move.destination());
-        int capturedValue = captured == null ? 0 : captureValue(before, captured, move.destination());
-        if (replyLoss > Math.max(capturedValue + 260, movedValue / 2)
-                && defendersValue(after, move.destination(), color) == 0) {
-            return 0;
-        }
-
-        int score = 0;
-        score += Math.max(0, rankGain) * (type == PieceType.ROOK ? 520 : 380);
-        if (entersOpponentSide) {
-            score += type == PieceType.ROOK ? 1_050 : 760;
-        } else if (staysDeep) {
-            score += type == PieceType.ROOK ? 620 : 460;
-        }
-
-        Position enemyKing = before.findKing(color.opponent());
-        if (enemyKing != null) {
-            int beforeDistance = manhattan(move.source(), enemyKing);
-            int afterDistance = manhattan(move.destination(), enemyKing);
-            if (afterDistance < beforeDistance) {
-                score += (beforeDistance - afterDistance) * (type == PieceType.ROOK ? 220 : 170);
-            }
-            if (sameFileOrRank(move.destination(), enemyKing)) {
-                int between = after.countBetween(move.destination(), enemyKing);
-                if (type == PieceType.ROOK && between <= 1) {
-                    score += 1_050;
-                } else if (type == PieceType.CANNON && between == 1) {
-                    score += 1_150;
-                } else if (between <= 2) {
-                    score += 420;
-                }
-            }
-        }
-
-        int hiddenTargets = majorHiddenTargets(after, move.destination(), color);
-        score += Math.min(1_200, hiddenTargets * (type == PieceType.ROOK ? 360 : 260));
-        if (type == PieceType.CANNON) {
-            score += Math.max(0, cannonScreenScore(after, color) - cannonScreenScore(before, color)) / 2;
-        }
-        if (captured != null && captured.color() == color.opponent()) {
-            score += Math.min(900, capturedValue / 2);
-        }
-        score -= Math.max(0, replyLoss - capturedValue) / 2;
-        return Math.max(0, Math.min(ROOK_CANNON_DEEP_INVASION_BONUS, score));
     }
 
     private int majorOffensiveCoordinationProgressScore(Board before, Board after, Move move, PlayerColor color) {
@@ -5526,6 +5523,12 @@ public class SearchAi {
             return WIN_SCORE;
         }
 
+        String cacheKey = aiColor.name() + "|" + knownPositionKey(board);
+        Integer cached = evalCache.get(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
+
         int score = 0;
         for (Position position : board.occupiedPositions()) {
             Piece piece = board.get(position);
@@ -5564,6 +5567,10 @@ public class SearchAi {
         score -= opponentPlanThreatScore(board, aiColor) / 2;
         score += opponentPlanThreatScore(board, aiColor.opponent()) / 2;
         score += hiddenInformationScore(board, aiColor) - hiddenInformationScore(board, aiColor.opponent());
+        // Hidden piece count advantage: more hidden pieces = more upside potential
+        int ownHidden = hiddenPieceCount(board, aiColor);
+        int oppHidden = hiddenPieceCount(board, aiColor.opponent());
+        score += (ownHidden - oppHidden) * hiddenPhase(board) * 4;
         score += cannonScreenScore(board, aiColor) - cannonScreenScore(board, aiColor.opponent());
         score += knightKillShapeScore(board, aiColor) - knightKillShapeScore(board, aiColor.opponent());
         score += pawnConstrictionScore(board, aiColor) - pawnConstrictionScore(board, aiColor.opponent());
@@ -5572,17 +5579,28 @@ public class SearchAi {
         score += flyingKingCoordinationScore(board, aiColor) - flyingKingCoordinationScore(board, aiColor.opponent());
         int xiangqiWeight = xiangqiKnowledgeWeight(board);
         score += xiangqiKnowledge.score(board, aiColor, ruleEngine, moveGenerator) * xiangqiWeight / 100;
+        if (evalCache.size() < EVAL_CACHE_LIMIT) {
+            evalCache.put(cacheKey, score);
+        }
         return score;
     }
 
     private int immediateThreatScore(Board board, PlayerColor color) {
         int best = 0;
+        int examined = 0;
         for (Move move : moveGenerator.generateActions(board, color, 0)) {
             if (!ruleEngine.canMoveAndKeepKingSafe(board, move.source(), move.destination(), color)) {
                 continue;
             }
             Piece mover = board.get(move.source());
             Piece captured = board.get(move.destination());
+            // Only evaluate captures and check-giving moves for speed
+            boolean isCapture = captured != null;
+            Board next = applyForSearch(board, move);
+            if (!isCapture && !ruleEngine.isInCheck(next, color.opponent())) {
+                continue;
+            }
+            examined++;
             int score = 0;
             if (captured != null) {
                 score += captureValue(board, captured, move.destination()) * 3;
@@ -5593,7 +5611,6 @@ public class SearchAi {
                     score -= pieceSearchValue(board, mover, move.source()) / 4;
                 }
             }
-            Board next = applyForSearch(board, move);
             if (ruleEngine.isInCheck(next, color.opponent())) {
                 if (!moveGenerator.hasCheckEscape(next, color.opponent())) {
                     score += WIN_SCORE / 4;
@@ -5612,7 +5629,7 @@ public class SearchAi {
                 }
             }
             best = Math.max(best, score);
-            if (best >= WIN_SCORE / 4) {
+            if (best >= WIN_SCORE / 4 || examined >= 24) {
                 return best;
             }
         }
@@ -7150,12 +7167,12 @@ public class SearchAi {
     private int xiangqiKnowledgeWeight(Board board) {
         int phase = visiblePhase(board);
         if (phase <= XIANGQI_KNOWLEDGE_START_PHASE) {
-            return Math.max(0, phase / 3);
+            return Math.max(15, phase * 4 / 3);
         }
         if (phase >= XIANGQI_KNOWLEDGE_FULL_PHASE) {
             return 100;
         }
-        return 10 + (phase - XIANGQI_KNOWLEDGE_START_PHASE) * 90
+        return 25 + (phase - XIANGQI_KNOWLEDGE_START_PHASE) * 75
                 / (XIANGQI_KNOWLEDGE_FULL_PHASE - XIANGQI_KNOWLEDGE_START_PHASE);
     }
 
